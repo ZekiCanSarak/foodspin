@@ -1,18 +1,16 @@
 'use strict';
 
-/* ── Data ─────────────────────────────────────────────── */
+/* ── Countries ────────────────────────────────────────── */
+// American, Dutch, and Indian omitted — TheMealDB free tier returns no meals for them
 const COUNTRIES = [
-    { name: 'American',   flag: '🇺🇸' },
     { name: 'British',    flag: '🇬🇧' },
     { name: 'Canadian',   flag: '🇨🇦' },
     { name: 'Chinese',    flag: '🇨🇳' },
     { name: 'Croatian',   flag: '🇭🇷' },
-    { name: 'Dutch',      flag: '🇳🇱' },
     { name: 'Egyptian',   flag: '🇪🇬' },
     { name: 'Filipino',   flag: '🇵🇭' },
     { name: 'French',     flag: '🇫🇷' },
     { name: 'Greek',      flag: '🇬🇷' },
-    { name: 'Indian',     flag: '🇮🇳' },
     { name: 'Irish',      flag: '🇮🇪' },
     { name: 'Italian',    flag: '🇮🇹' },
     { name: 'Jamaican',   flag: '🇯🇲' },
@@ -31,13 +29,49 @@ const COUNTRIES = [
     { name: 'Vietnamese', flag: '🇻🇳' },
 ];
 
-const ITEM_H  = 80;  // px — must match CSS .reel-item height
-const REPEATS = 40;  // strip repetitions — keeps strip long enough
+const ITEM_H      = 80;  // px — must match CSS .reel-item height
+const REPEATS     = 40;  // strip repetitions — keeps strip long enough
+const MAX_HISTORY = 6;   // max recent meals to remember per country
+
+/* ── Meal history (prevents repeating dishes) ─────────── */
+const mealHistory  = {}; // { countryName: [idMeal, ...] }
+const lastMealShown = {}; // { countryName: idMeal } — hard block on consecutive repeat
+
+function pickMeal(countryName, allMeals) {
+    const lastId  = lastMealShown[countryName];
+    const history = mealHistory[countryName] || [];
+
+    // Hard rule: never show the same meal twice in a row
+    let pool = allMeals.filter(m => String(m.idMeal) !== String(lastId));
+    if (!pool.length) pool = allMeals; // only one meal exists, can't avoid it
+
+    // Soft rule: skip meals seen recently
+    let fresh = pool.filter(m => !history.includes(String(m.idMeal)));
+    if (!fresh.length) {
+        mealHistory[countryName] = [];  // full cycle done — reset
+        fresh = pool;
+    }
+
+    const pick = fresh[Math.floor(Math.random() * fresh.length)];
+    const pickId = String(pick.idMeal);
+
+    lastMealShown[countryName] = pickId;
+    mealHistory[countryName]   = [...(mealHistory[countryName] || []), pickId]
+        .slice(-MAX_HISTORY);
+
+    return pick;
+}
+
+/* ── DOM refs ─────────────────────────────────────────── */
+const spinBtn    = document.getElementById('spinBtn');
+const statusText = document.getElementById('statusText');
+const resultCard = document.getElementById('resultCard');
+const machine    = document.getElementById('machine');
+const reelsRow   = document.getElementById('reelsRow');
+const lightsBar  = document.getElementById('lightsBar');
 
 /* ── Lights ───────────────────────────────────────────── */
 const LIGHT_COLORS = ['#ff4444', '#44dd44', '#4488ff', '#ffcc00', '#ff44ff', '#44ffff'];
-const lightsBar = document.getElementById('lightsBar');
-
 for (let i = 0; i < 36; i++) {
     const d = document.createElement('div');
     d.className = 'dot';
@@ -50,7 +84,7 @@ for (let i = 0; i < 36; i++) {
 class Reel {
     constructor(rowEl) {
         this.rowH   = COUNTRIES.length * ITEM_H;
-        this.offset = (REPEATS / 2) * this.rowH; // start mid-strip
+        this.offset = (REPEATS / 2) * this.rowH;
 
         const wrap = document.createElement('div');
         wrap.className = 'reel-wrapper';
@@ -97,7 +131,6 @@ class Reel {
                     this.offset = start + (target - start) * e;
                     this._draw();
 
-                    // blur proportional to instantaneous speed
                     const speed = (target - start) * (1 - p) / duration * 16;
                     this.strip.style.filter = `blur(${Math.min(speed * 0.04, 5)}px)`;
 
@@ -123,8 +156,7 @@ class Reel {
     }
 }
 
-/* ── Build three reels ────────────────────────────────── */
-const reelsRow = document.getElementById('reelsRow');
+/* ── Build reels ──────────────────────────────────────── */
 const reels = [
     new Reel(reelsRow),
     new Reel(reelsRow),
@@ -132,10 +164,6 @@ const reels = [
 ];
 
 /* ── Spin handler ─────────────────────────────────────── */
-const spinBtn    = document.getElementById('spinBtn');
-const statusText = document.getElementById('statusText');
-const resultCard = document.getElementById('resultCard');
-const machine    = document.getElementById('machine');
 let busy = false;
 
 spinBtn.addEventListener('click', async () => {
@@ -148,23 +176,20 @@ spinBtn.addEventListener('click', async () => {
 
     const idx = Math.floor(Math.random() * COUNTRIES.length);
 
-    // stagger: left stops first, right last
     await Promise.all([
         reels[0].spin(idx, 2200, 0),
         reels[1].spin(idx, 2900, 150),
         reels[2].spin(idx, 3600, 300),
     ]);
 
-    // Derive country from the reel's actual position — guarantees recipe matches display.
-    // Middle slot starts ITEM_H pixels into the window, so add ITEM_H to the offset.
+    // Derive country from the reel's actual position — guarantees recipe matches display
     const midStripPos = reels[0].offset + ITEM_H;
     const rawIdx      = Math.round(midStripPos / ITEM_H);
     const chosenIdx   = ((rawIdx % COUNTRIES.length) + COUNTRIES.length) % COUNTRIES.length;
     const chosen      = COUNTRIES[chosenIdx];
 
-    // win flash
     machine.classList.remove('won');
-    void machine.offsetWidth; // force reflow to restart animation
+    void machine.offsetWidth;
     machine.classList.add('won');
 
     statusText.className = 'status-text win';
@@ -191,7 +216,7 @@ async function loadMeal(country) {
         const listJson = await listRes.json();
         if (!listJson.meals?.length) throw new Error('No meals found for this cuisine.');
 
-        const pick = listJson.meals[Math.floor(Math.random() * listJson.meals.length)];
+        const pick = pickMeal(country.name, listJson.meals);
 
         const detailRes  = await fetch(
             `https://www.themealdb.com/api/json/v1/1/lookup.php?i=${pick.idMeal}`
@@ -208,11 +233,9 @@ async function loadMeal(country) {
 }
 
 function parseSteps(raw) {
-    // try newline split first
     let steps = raw.split(/\r?\n/).map(s => s.trim()).filter(s => s.length > 5);
     if (steps.length >= 2) return steps;
 
-    // fall back: split on sentence boundaries
     steps = raw
         .replace(/([.!?])\s+/g, '$1\n')
         .split('\n')
@@ -222,7 +245,6 @@ function parseSteps(raw) {
 }
 
 function renderMeal(m, country) {
-    // collect non-empty ingredient pairs
     const ings = [];
     for (let i = 1; i <= 20; i++) {
         const ing  = (m[`strIngredient${i}`] || '').trim();
